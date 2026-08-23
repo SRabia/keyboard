@@ -19,15 +19,39 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
+#[derive(Debug, embedded_cli::Command)]
+enum BaseCommand {
+    /// Control RED Led
+    Led {
+        #[command(subcommand)]
+        cmd: LedCommand,
+    },
+    /// Show some status
+    Status,
+}
+
+#[derive(Debug, embedded_cli::Command)]
+enum LedCommand {
+    ///Turn led On
+    TurnOn,
+    ///Turn Led off
+    TurnOff,
+}
+fn set_led(
+    cli: &mut embedded_cli::cli::CliHandle<'_, Writer, EndpointError>,
+    cmd: LedCommand,
+) -> Result<(), EndpointError> {
+    Ok(())
+}
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     let mut led = Output::new(p.PIN_17, Level::Low);
-    // Create the driver, from the HAL.
+
     let driver = Driver::new(p.USB, Irqs);
 
-    // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
     config.product = Some("USB-serial example");
@@ -35,8 +59,6 @@ async fn main(_spawner: Spawner) {
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 
-    // Create embassy-usb DeviceBuilder using the driver and config.
-    // It needs some buffers for building the descriptors.
     let mut config_descriptor = [0; 256];
     let mut bos_descriptor = [0; 256];
     let mut control_buf = [0; 64];
@@ -73,18 +95,36 @@ async fn main(_spawner: Spawner) {
 
     info!("Hello there!");
     // Do stuff with the class!
-    let echo_fut = async {
+    let shell_fut = async {
         loop {
             class.wait_connection().await;
             log::info!("Connected me");
-            let _ = echo(&mut class).await;
+            let _ = shell(&mut class).await;
             log::info!("Disconnected fu");
         }
     };
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join(usb_fut, join(echo_fut, log_fut)).await;
+    join(usb_fut, join(shell_fut, log_fut)).await;
+}
+
+struct Writer<'a> {
+    usbcdc: CdcAcmClass<'a, Driver<'a, USB>>,
+}
+
+impl<'a> embedded_io_async::ErrorType for Writer<'a> {
+    type Error = embassy_usb::driver::EndpointError;
+}
+
+impl<'a> embedded_io_async::Write for Writer<'a> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.usbcdc.write_packet(buf).await?;
+        Ok(buf.len())
+    }
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 struct Disconnected {}
@@ -98,14 +138,23 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-async fn echo<'d, T: Instance + 'd>(
+async fn shell<'d, T: Instance + 'd>(
     class: &mut CdcAcmClass<'d, Driver<'d, T>>,
 ) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
     loop {
         let n = class.read_packet(&mut buf).await?;
         let data = &buf[..n];
-        log::info!("data: {:x?}", data);
         class.write_packet(data).await?;
+        match &buf[..n] {
+            b"help" => {
+                class.write_packet(b"Command help exe\n").await?;
+            }
+            _ => {
+                class.write_packet(b"unknow command\n").await?;
+            }
+        }
+
+        log::info!("data: {:x?}", data);
     }
 }
