@@ -19,31 +19,6 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
-#[derive(Debug, embedded_cli::Command)]
-enum BaseCommand {
-    /// Control RED Led
-    Led {
-        #[command(subcommand)]
-        cmd: LedCommand,
-    },
-    /// Show some status
-    Status,
-}
-
-#[derive(Debug, embedded_cli::Command)]
-enum LedCommand {
-    ///Turn led On
-    TurnOn,
-    ///Turn Led off
-    TurnOff,
-}
-fn set_led(
-    cli: &mut embedded_cli::cli::CliHandle<'_, Writer, EndpointError>,
-    cmd: LedCommand,
-) -> Result<(), EndpointError> {
-    Ok(())
-}
-
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -99,7 +74,7 @@ async fn main(_spawner: Spawner) {
         loop {
             class.wait_connection().await;
             log::info!("Connected me");
-            let _ = shell(&mut class).await;
+            let _ = terminal_task(&mut class).await;
             log::info!("Disconnected fu");
         }
     };
@@ -107,24 +82,6 @@ async fn main(_spawner: Spawner) {
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
     join(usb_fut, join(shell_fut, log_fut)).await;
-}
-
-struct Writer<'a> {
-    usbcdc: CdcAcmClass<'a, Driver<'a, USB>>,
-}
-
-impl<'a> embedded_io_async::ErrorType for Writer<'a> {
-    type Error = embassy_usb::driver::EndpointError;
-}
-
-impl<'a> embedded_io_async::Write for Writer<'a> {
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        self.usbcdc.write_packet(buf).await?;
-        Ok(buf.len())
-    }
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
 }
 
 struct Disconnected {}
@@ -138,23 +95,127 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
-async fn shell<'d, T: Instance + 'd>(
+enum TerminalState {
+    Normal,
+    Esc,
+    EscBracket,
+}
+
+struct Terminal {
+    state: TerminalState,
+    line: heapless::Vec<u8, 512>,
+}
+
+impl Terminal {
+    //TODO: init with initial prompt line
+    pub fn new() -> Self {
+        Terminal {
+            state: TerminalState::Normal,
+            line: heapless::Vec::from_slice(b"> ").unwrap(),
+        }
+    }
+
+    pub fn update(&mut self, raw_line: &[u8]) {
+        for c in raw_line {
+            match self.state {
+                TerminalState::Normal => self.process_normal(*c),
+                TerminalState::Esc => {
+                    if *c == b'[' {
+                        self.state = TerminalState::EscBracket
+                    } else {
+                        self.state = TerminalState::Normal
+                    }
+                }
+                TerminalState::EscBracket => self.process_esc(*c),
+            }
+        }
+    }
+
+    fn process_esc(&mut self, c: u8) {
+        //TODO: replace comment command with enum of value instead of hardcoded ascii code
+        match c {
+            b'A' => {
+                //up
+            }
+            b'B' => {
+                //down
+            }
+            b'D' => {
+                //down
+            }
+            b'H' => {
+                //down
+            }
+            b'F' => {
+                //down
+            }
+            _ => {
+                //echo back
+            }
+        }
+        self.state = TerminalState::Normal;
+    }
+
+    //TODO: don't hardcode Vec size
+    pub fn get_render_line(&mut self) -> heapless::Vec<u8, 64> {
+        let mut render_line = heapless::Vec::new();
+        render_line.extend_from_slice(self.line.as_slice()).unwrap();
+        self.line.clear();
+        //self.line.extend_from_slice(b"> ").unwrap();
+        render_line
+    }
+
+    //TODO: replace comment command with enum of value instead of hardcoded ascii code
+
+    fn process_normal(&mut self, c: u8) {
+        match c {
+            0x08 | 0x7f => {
+                //backspace
+                self.line.extend_from_slice(b"\x08 \x08").unwrap();
+            }
+            b'\r' | b'\n' => {
+                self.line.extend_from_slice(b"\r\n> ").unwrap();
+                //enter
+            }
+            _ => {
+                self.line.push(c).unwrap();
+            }
+        }
+    }
+}
+
+async fn terminal_task<'d, T: Instance + 'd>(
     class: &mut CdcAcmClass<'d, Driver<'d, T>>,
 ) -> Result<(), Disconnected> {
     let mut buf = [0; 64];
+    let mut terminal = Terminal::new();
     loop {
         let n = class.read_packet(&mut buf).await?;
         let data = &buf[..n];
-        class.write_packet(data).await?;
-        match &buf[..n] {
-            b"help" => {
-                class.write_packet(b"Command help exe\n").await?;
-            }
-            _ => {
-                class.write_packet(b"unknow command\n").await?;
-            }
-        }
+        terminal.update(data);
+        class
+            .write_packet(terminal.get_render_line().as_slice())
+            .await?;
 
-        log::info!("data: {:x?}", data);
+        //for c in data {
+        //    match c {
+        //        0x08 | 0x7f => {
+        //            //backspace
+        //            class.write_packet(b"\x08 \x08").await?;
+        //        }
+        //        _ => {
+        //            let echo: &[u8; 1] = &[*c];
+        //            class.write_packet(echo).await?;
+        //        }
+        //    }
+        //}
+        //match &buf[..n] {
+        //    b"help" => {
+        //        class.write_packet(b"Command help exe\n").await?;
+        //    }
+        //    _ => {
+        //        class.write_packet(b"unknow command\n").await?;
+        //    }
+        //}
     }
 }

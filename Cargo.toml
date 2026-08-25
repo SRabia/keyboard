@@ -15,6 +15,7 @@ cortex-m-rt = "0.7.5"
 embassy-futures = "0.1"
 static_cell = "2.1"
 portable-atomic = { version = "1.14", features = ["critical-section"] }
+heapless = "0.9.3"
 
 
 log = "0.4.33"
