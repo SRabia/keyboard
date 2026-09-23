@@ -19,8 +19,16 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
+#[embassy_executor::task]
+async fn heartbeat() {
+    loop {
+        log::info!("still alive");
+        Timer::after_secs(10).await;
+    }
+}
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     let mut led = Output::new(p.PIN_17, Level::Low);
@@ -50,6 +58,8 @@ async fn main(_spawner: Spawner) {
         &mut control_buf,
     );
     led.set_high();
+
+    spawner.spawn(heartbeat()).unwrap();
 
     // Create classes on the builder.
     let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
@@ -103,7 +113,9 @@ enum TerminalState {
 
 struct Terminal {
     state: TerminalState,
-    line: heapless::Vec<u8, 512>,
+    line_input: heapless::Vec<u8, 128>,
+    line_output: heapless::Vec<u8, 256>,
+    cursor: usize,
 }
 
 impl Terminal {
@@ -111,15 +123,19 @@ impl Terminal {
     pub fn new() -> Self {
         Terminal {
             state: TerminalState::Normal,
-            line: heapless::Vec::from_slice(b"> ").unwrap(),
+            line_output: heapless::Vec::from_slice(b"> ").unwrap(),
+            line_input: heapless::Vec::new(),
+            cursor: 0,
         }
     }
 
     pub fn update(&mut self, raw_line: &[u8]) {
+        log::info!("usb packet receive {:?}", raw_line);
         for c in raw_line {
             match self.state {
                 TerminalState::Normal => self.process_normal(*c),
                 TerminalState::Esc => {
+                    log::info!("esc detected");
                     if *c == b'[' {
                         self.state = TerminalState::EscBracket
                     } else {
@@ -131,54 +147,133 @@ impl Terminal {
         }
     }
 
+    fn move_left(&mut self, amount: usize) {
+        for _ in 0..amount {
+            self.output(b"\x1b[D");
+        }
+    }
+    fn enter(&mut self) {
+        self.output(b"\r\n> ");
+        self.cursor = 0;
+        self.line_input.clear();
+        //TODO: add history here
+    }
+
+    fn _move_right(&mut self, amount: usize) {
+        for _ in 0..amount {
+            self.output(b"\x1b[C");
+        }
+    }
+    fn output(&mut self, data: &[u8]) {
+        self.line_output.extend_from_slice(data).unwrap();
+        log::info!("line buffer size {}", self.line_output.len());
+    }
+
+    fn move_cursor_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.output(b"\x1b[D");
+            log::info!(
+                "move cursor left {} line_len {}",
+                self.cursor,
+                self.line_input.len()
+            );
+        }
+    }
+    fn move_cursor_right(&mut self) {
+        // Right
+        if self.cursor < self.line_input.len() {
+            self.cursor += 1;
+            self.output(b"\x1b[C");
+            log::info!(
+                "move cursor right {} line_len {}",
+                self.cursor,
+                self.line_input.len()
+            );
+        }
+    }
+
     fn process_esc(&mut self, c: u8) {
+        log::info!("esc process");
         //TODO: replace comment command with enum of value instead of hardcoded ascii code
         match c {
             b'A' => {
-                //up
+                //up history
             }
             b'B' => {
-                //down
+                //down history
+            }
+            b'C' => {
+                self.move_cursor_right();
             }
             b'D' => {
-                //down
+                self.move_cursor_left();
             }
             b'H' => {
-                //down
+                //Home
             }
             b'F' => {
-                //down
+                //End
             }
-            _ => {
-                //echo back
-            }
+            _ => {}
         }
         self.state = TerminalState::Normal;
     }
 
     //TODO: don't hardcode Vec size
-    pub fn get_render_line(&mut self) -> heapless::Vec<u8, 64> {
-        let mut render_line = heapless::Vec::new();
-        render_line.extend_from_slice(self.line.as_slice()).unwrap();
-        self.line.clear();
-        //self.line.extend_from_slice(b"> ").unwrap();
-        render_line
+    pub fn take_output(&mut self) -> heapless::Vec<u8, 256> {
+        let mut output = heapless::Vec::new();
+        core::mem::swap(&mut output, &mut self.line_output);
+        output
+    }
+
+    fn redraw_from_cursor(&mut self) {
+        self.output(b"\r");
+        self.output(b"> ");
+        //reprint the prompt
+        let input = self.line_input.clone();
+        self.output(input.as_slice());
+        self.output(b"\x1b[K");
+        let amount = self.line_input.len() - self.cursor;
+        self.move_left(amount);
+    }
+
+    fn insert_character(&mut self, c: u8) {
+        assert!(self.cursor <= self.line_input.len());
+        if self.cursor == self.line_input.len() {
+            self.line_input.push(c).unwrap();
+            self.output(&[c]);
+            self.cursor += 1;
+            return;
+        }
+        self.line_input.insert(self.cursor, c).unwrap();
+        self.cursor += 1;
+        self.redraw_from_cursor();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        self.line_input.remove(self.cursor);
+        self.redraw_from_cursor();
     }
 
     //TODO: replace comment command with enum of value instead of hardcoded ascii code
 
     fn process_normal(&mut self, c: u8) {
+        log::info!("process normal");
         match c {
+            0x1b => self.state = TerminalState::Esc,
             0x08 | 0x7f => {
-                //backspace
-                self.line.extend_from_slice(b"\x08 \x08").unwrap();
+                self.backspace();
             }
             b'\r' | b'\n' => {
-                self.line.extend_from_slice(b"\r\n> ").unwrap();
-                //enter
+                self.enter();
             }
             _ => {
-                self.line.push(c).unwrap();
+                self.insert_character(c);
             }
         }
     }
@@ -193,29 +288,10 @@ async fn terminal_task<'d, T: Instance + 'd>(
         let n = class.read_packet(&mut buf).await?;
         let data = &buf[..n];
         terminal.update(data);
-        class
-            .write_packet(terminal.get_render_line().as_slice())
-            .await?;
-
-        //for c in data {
-        //    match c {
-        //        0x08 | 0x7f => {
-        //            //backspace
-        //            class.write_packet(b"\x08 \x08").await?;
-        //        }
-        //        _ => {
-        //            let echo: &[u8; 1] = &[*c];
-        //            class.write_packet(echo).await?;
-        //        }
-        //    }
-        //}
-        //match &buf[..n] {
-        //    b"help" => {
-        //        class.write_packet(b"Command help exe\n").await?;
-        //    }
-        //    _ => {
-        //        class.write_packet(b"unknow command\n").await?;
-        //    }
-        //}
+        if n > 0 {
+            class
+                .write_packet(terminal.take_output().as_slice())
+                .await?;
+        }
     }
 }
