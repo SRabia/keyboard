@@ -151,6 +151,7 @@ impl Terminal {
         for _ in 0..amount {
             self.output(b"\x1b[D");
         }
+        log::info!("moved left");
     }
     fn enter(&mut self) {
         self.output(b"\r\n> ");
@@ -164,8 +165,12 @@ impl Terminal {
             self.output(b"\x1b[C");
         }
     }
+
     fn output(&mut self, data: &[u8]) {
-        self.line_output.extend_from_slice(data).unwrap();
+        let _ = self
+            .line_output
+            .extend_from_slice(data)
+            .map_err(|e| log::info!("output extend fail with erro {e}"));
         log::info!("line buffer size {}", self.line_output.len());
     }
 
@@ -232,21 +237,30 @@ impl Terminal {
         self.output(b"> ");
         //reprint the prompt
         let input = self.line_input.clone();
+        log::info!("redraw from cursor len input {}", self.line_input.len());
         self.output(input.as_slice());
         self.output(b"\x1b[K");
         let amount = self.line_input.len() - self.cursor;
+        log::info!("moving left by {amount}");
         self.move_left(amount);
     }
 
     fn insert_character(&mut self, c: u8) {
+        log::info!("assert {} <= {}", self.cursor, self.line_input.len());
         assert!(self.cursor <= self.line_input.len());
         if self.cursor == self.line_input.len() {
-            self.line_input.push(c).unwrap();
+            let _ = self
+                .line_input
+                .push(c)
+                .map_err(|e| log::info!("push char extend fail with erro {e}"));
             self.output(&[c]);
             self.cursor += 1;
             return;
         }
-        self.line_input.insert(self.cursor, c).unwrap();
+        let _ = self
+            .line_input
+            .insert(self.cursor, c)
+            .map_err(|e| log::info!("insert char extend fail with erro {e}"));
         self.cursor += 1;
         self.redraw_from_cursor();
     }
@@ -289,9 +303,13 @@ async fn terminal_task<'d, T: Instance + 'd>(
         let data = &buf[..n];
         terminal.update(data);
         if n > 0 {
-            class
-                .write_packet(terminal.take_output().as_slice())
-                .await?;
+            let seg_write_64 = terminal.take_output();
+            for s in seg_write_64.chunks(2) {
+                let _ = class
+                    .write_packet(s)
+                    .await
+                    .map_err(|e| log::info!("fail to write packed usb {e}"));
+            }
         }
     }
 }
