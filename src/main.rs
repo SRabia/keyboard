@@ -3,10 +3,10 @@
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output};
+use embassy_rp::gpio::{AnyPin, Level, Output};
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, Instance, InterruptHandler};
+use embassy_rp::{bind_interrupts, Peri};
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
@@ -22,18 +22,20 @@ bind_interrupts!(struct Irqs {
 });
 
 #[embassy_executor::task]
-async fn heartbeat() {
+async fn heartbeat(led: Peri<'static, AnyPin>) {
+    let mut output_led = Output::new(led, Level::Low);
     loop {
-        log::info!("still alive");
-        Timer::after_secs(10).await;
+        output_led.toggle();
+        Timer::after_millis(50).await;
+        output_led.toggle();
+
+        Timer::after_secs(5).await;
     }
 }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-
-    let mut led = Output::new(p.PIN_17, Level::Low);
 
     let driver = Driver::new(p.USB, Irqs);
 
@@ -59,9 +61,8 @@ async fn main(spawner: Spawner) {
         &mut [], // no msos descriptors
         &mut control_buf,
     );
-    led.set_high();
 
-    spawner.spawn(heartbeat()).unwrap();
+    spawner.spawn(heartbeat(p.PIN_17.into())).unwrap();
 
     // Create classes on the builder.
     let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);

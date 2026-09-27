@@ -45,7 +45,6 @@ impl Terminal {
             match self.state {
                 TerminalState::Normal => self.process_normal(*c),
                 TerminalState::Esc => {
-                    log::info!("esc detected");
                     if *c == b'[' {
                         self.state = TerminalState::EscBracket
                     } else {
@@ -61,7 +60,6 @@ impl Terminal {
         for _ in 0..amount {
             self.output(b"\x1b[D");
         }
-        log::info!("moved left");
     }
 
     fn prompt(&mut self) {
@@ -87,30 +85,20 @@ impl Terminal {
             .line_output
             .extend_from_slice(data)
             .map_err(|e| log::info!("output extend fail with erro {e}"));
-        log::info!("line buffer size {}", self.line_output.len());
     }
 
     fn move_cursor_left(&mut self) {
         if self.cursor > 0 {
             self.cursor -= 1;
             self.output(b"\x1b[D");
-            log::info!(
-                "move cursor left {} line_len {}",
-                self.cursor,
-                self.line_input.len()
-            );
         }
     }
+
     fn move_cursor_right(&mut self) {
         // Right
         if self.cursor < self.line_input.len() {
             self.cursor += 1;
             self.output(b"\x1b[C");
-            log::info!(
-                "move cursor right {} line_len {}",
-                self.cursor,
-                self.line_input.len()
-            );
         }
     }
 
@@ -155,7 +143,7 @@ impl Terminal {
         self.prompt();
         //reprint the prompt
         let input = self.line_input.clone();
-        log::info!("redraw from cursor len input {}", self.line_input.len());
+        //log::info!("redraw from cursor len input {}", self.line_input.len());
         self.output(input.as_slice());
         self.output(b"\x1b[K");
         let amount = self.line_input.len() - self.cursor;
@@ -190,7 +178,6 @@ impl Terminal {
     }
 
     //TODO: replace comment command with enum of value instead of hardcoded ascii code
-
     fn process_normal(&mut self, c: u8) {
         match c {
             0x1b => self.state = TerminalState::Esc,
