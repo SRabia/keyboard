@@ -1,18 +1,21 @@
-use core::str::FromStr;
+use crate::config;
+use crate::config::terminal::MAX_BUF_IN_LINE;
+use crate::config::terminal::MAX_BUF_OUT_LINE;
+use crate::config::terminal::PROMPT_LEN;
 
-const MAX_BUF_OUT_LINE: usize = 1024;
-const MAX_BUF_IN_LINE: usize = 258;
+use core::str::FromStr;
 
 enum TerminalState {
     Normal,
     Esc,
     EscBracket,
+    EscBracketNumb(u8),
 }
 
 pub struct Terminal {
     state: TerminalState,
     pub line_input: heapless::Vec<u8, MAX_BUF_IN_LINE>,
-    init_prompt: heapless::String<128>,
+    init_prompt: heapless::String<PROMPT_LEN>,
     pub line_output: heapless::Vec<u8, MAX_BUF_OUT_LINE>,
     pub cursor: usize,
 }
@@ -28,9 +31,10 @@ impl Terminal {
     pub fn new() -> Self {
         Terminal {
             state: TerminalState::Normal,
-            line_output: heapless::Vec::from_slice(b"> ").unwrap(),
+            line_output: heapless::Vec::from_slice(config::terminal::DEFAULT_PROMPT.as_bytes())
+                .unwrap(),
             line_input: heapless::Vec::new(),
-            init_prompt: heapless::String::from_str(">").unwrap(),
+            init_prompt: heapless::String::from_str(config::terminal::DEFAULT_PROMPT).unwrap(),
             cursor: 0,
         }
     }
@@ -48,10 +52,14 @@ impl Terminal {
                     if *c == b'[' {
                         self.state = TerminalState::EscBracket
                     } else {
-                        self.state = TerminalState::Normal
+                        self.state = TerminalState::Normal;
                     }
                 }
-                TerminalState::EscBracket => self.process_esc(*c),
+                TerminalState::EscBracketNumb(numb) => {
+                    log::info!("process esc bracket");
+                    self.process_esc_brac_numb(*c, numb);
+                }
+                TerminalState::EscBracket => self.process_esc_brac(*c),
             }
         }
     }
@@ -74,7 +82,7 @@ impl Terminal {
         //TODO: add history here
     }
 
-    fn _move_right(&mut self, amount: usize) {
+    fn move_right(&mut self, amount: usize) {
         for _ in 0..amount {
             self.output(b"\x1b[C");
         }
@@ -95,43 +103,79 @@ impl Terminal {
     }
 
     fn move_cursor_right(&mut self) {
-        // Right
         if self.cursor < self.line_input.len() {
             self.cursor += 1;
             self.output(b"\x1b[C");
         }
     }
+    fn move_cursor_end(&mut self) {
+        if self.cursor < self.line_input.len() {
+            self.move_right(self.line_input.len() - self.cursor);
+            self.cursor = self.line_input.len();
+        }
+    }
+    fn move_cursor_home(&mut self) {
+        if self.cursor > 0 {
+            self.move_left(self.cursor);
+            self.cursor = 0;
+        }
+    }
 
-    fn process_esc(&mut self, c: u8) {
+    fn process_esc_brac_numb(&mut self, c: u8, n: u8) {
+        if c != b'~' {
+            self.state = TerminalState::Normal;
+            return;
+        }
+        match n {
+            1 => {
+                self.move_cursor_home();
+            }
+            4 => {
+                self.move_cursor_end();
+            }
+            _ => {}
+        }
+    }
+
+    fn process_esc_brac(&mut self, c: u8) {
         //TODO: replace comment command with enum of value instead of hardcoded ascii code
         match c {
             b'A' => {
                 //up history
+                self.state = TerminalState::Normal;
             }
             b'B' => {
                 //down history
+                self.state = TerminalState::Normal;
             }
             b'C' => {
                 self.move_cursor_right();
+                self.state = TerminalState::Normal;
             }
             b'D' => {
                 self.move_cursor_left();
+                self.state = TerminalState::Normal;
             }
             b'H' => {
-                //Home
+                log::info!("moving home");
+                self.move_cursor_home();
+                self.state = TerminalState::Normal;
             }
             b'F' => {
-                //End
+                log::info!("moving end");
+                self.move_cursor_end();
+                self.state = TerminalState::Normal;
             }
-            //TODO: have <C-a> to go home
-            //TODO: have <C-e> to go end
-            //TODO: have <C-u> to delete all before cursor
-            _ => {}
+            b'0'..=b'9' => {
+                log::info!("number bracket");
+                self.state = TerminalState::EscBracketNumb(c - b'0');
+            }
+            _ => {
+                self.state = TerminalState::Normal;
+            }
         }
-        self.state = TerminalState::Normal;
     }
 
-    //TODO: don't hardcode Vec size
     pub fn take_output(&mut self) -> heapless::Vec<u8, MAX_BUF_OUT_LINE> {
         let mut output = heapless::Vec::new();
         core::mem::swap(&mut output, &mut self.line_output);
@@ -183,6 +227,12 @@ impl Terminal {
             0x1b => self.state = TerminalState::Esc,
             0x08 | 0x7f => {
                 self.backspace();
+            }
+            0x01 => {
+                self.move_cursor_home();
+            }
+            0x05 => {
+                self.move_cursor_end();
             }
             b'\r' | b'\n' => {
                 self.enter();
